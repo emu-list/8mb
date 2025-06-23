@@ -4,7 +4,7 @@
 # SM64EX-OMM Android Builder - Versión Profesional
 # =============================================================================
 
-set -euo pipefail  # Salir en errores, variables no definidas y errores de pipe
+set -e  # Salir en errores, pero menos estricto
 
 # Configuración global
 readonly SCRIPT_NAME="$(basename "$0")"
@@ -15,25 +15,23 @@ readonly RESTART_INSTRUCTIONS="Cerrando shell. Para recompilar, desliza desde la
 
 # URLs y configuración de archivos
 readonly AUDIO_URL="https://github.com/emu-list/8mb/raw/refs/heads/main/luigiAudio.zip"
-readonly GITHUB_URL="https://raw.githubusercontent.com/emu-list/8mb/main/backup.gpg"
 readonly REPO_URL="https://github.com/robertkirkman/sm64ex-omm.git"
 
 # Archivos locales
 readonly AUDIO_ZIP="luigiAudio.zip"
 readonly AUDIO_DIR="luigiAudio"
-readonly GPG_FILE="backup.gpg"
 readonly BASEROM_FILE="${HOME}/baserom.us.z64"
 readonly PROJECT_DIR="${HOME}/sm64ex-omm"
 readonly SAMPLE_DIR="${PROJECT_DIR}/sound/samples"
 readonly APK_PATH="${PROJECT_DIR}/build/us_pc/sm64.us.f3dex2e.apk"
 
-# Lista de contraseñas para probar
-readonly PASSPHRASES=(
-    "M4n!5C@t2!9$GZkp3#"
-    "Luigi2024!"
-    "SM64ExOMM2024"
-    "Nintendo64ROM"
-    "SuperMario64"
+# Posibles ubicaciones del baserom
+readonly BASEROM_LOCATIONS=(
+    "/storage/emulated/0/Download/baserom.us.z64"
+    "/storage/emulated/0/baserom.us.z64"
+    "/storage/emulated/0/Download/baserom.z64"
+    "/storage/emulated/0/baserom.z64"
+    "${HOME}/baserom.us.z64"
 )
 
 # Colores para output
@@ -79,7 +77,7 @@ EOF
 
 cleanup_temp_files() {
     log "Limpiando archivos temporales..."
-    local files_to_clean=("$GPG_FILE" "$AUDIO_ZIP")
+    local files_to_clean=("$AUDIO_ZIP")
     
     for file in "${files_to_clean[@]}"; do
         if [[ -f "$file" ]]; then
@@ -133,19 +131,32 @@ install_dependencies() {
     
     # Actualizar repositorios y paquetes
     apt-mark hold bash >/dev/null 2>&1 || true
-    yes | pkg upgrade -y >/dev/null 2>&1
     
-    # Lista de paquetes necesarios
+    log "Actualizando paquetes existentes..."
+    yes | pkg upgrade -y >/dev/null 2>&1 || {
+        log_warning "Algunos paquetes no se pudieron actualizar, continuando..."
+    }
+    
+    # Lista de paquetes necesarios (sin gnupg)
     local packages=(
         "git" "wget" "make" "python" "getconf" "zip" "apksigner"
         "clang" "binutils" "libglvnd-dev" "aapt" "which" 
-        "netcat-openbsd" "gnupg" "unzip"
+        "netcat-openbsd" "unzip"
     )
     
     log "Instalando paquetes: ${packages[*]}"
-    yes | pkg install "${packages[@]}" >/dev/null 2>&1
     
-    log_success "Dependencias instaladas correctamente"
+    # Instalar paquetes uno por uno para mejor control de errores
+    for package in "${packages[@]}"; do
+        log "Instalando $package..."
+        if yes | pkg install "$package" >/dev/null 2>&1; then
+            log_success "$package instalado"
+        else
+            log_warning "Error instalando $package, puede que ya esté instalado"
+        fi
+    done
+    
+    log_success "Instalación de dependencias completada"
 }
 
 download_file() {
@@ -180,7 +191,56 @@ check_audio_files() {
     return 1
 }
 
+backup_audio_files() {
+    log "Creando respaldo de archivos de audio..."
+    
+    local backup_dir="${HOME}/audio_backup"
+    
+    # Crear directorio de respaldo
+    mkdir -p "$backup_dir"
+    
+    # Respaldar archivos de audio si existen
+    if [[ -d "$SAMPLE_DIR" ]] && [[ -n "$(ls -A "$SAMPLE_DIR" 2>/dev/null)" ]]; then
+        if cp -r "$SAMPLE_DIR"/* "$backup_dir/" 2>/dev/null; then
+            log_success "Archivos de audio respaldados en $backup_dir"
+            return 0
+        else
+            log_warning "No se pudieron respaldar todos los archivos de audio"
+            return 1
+        fi
+    else
+        log "No hay archivos de audio para respaldar"
+        return 1
+    fi
+}
+
+restore_audio_files() {
+    log "Restaurando archivos de audio desde respaldo..."
+    
+    local backup_dir="${HOME}/audio_backup"
+    
+    # Crear directorio de samples si no existe
+    mkdir -p "$SAMPLE_DIR"
+    
+    # Restaurar archivos de audio si existe el respaldo
+    if [[ -d "$backup_dir" ]] && [[ -n "$(ls -A "$backup_dir" 2>/dev/null)" ]]; then
+        if cp -r "$backup_dir"/* "$SAMPLE_DIR/" 2>/dev/null; then
+            log_success "Archivos de audio restaurados desde respaldo"
+            # Limpiar respaldo después de restaurar
+            rm -rf "$backup_dir"
+            return 0
+        else
+            log_error "Error al restaurar archivos de audio desde respaldo"
+            return 1
+        fi
+    else
+        log "No se encontró respaldo de archivos de audio"
+        return 1
+    fi
+}
+
 extract_audio_files() {
+    # Si ya tenemos archivos de audio, no necesitamos descargar
     if check_audio_files; then
         log "Saltando descarga de audio - archivos ya presentes"
         return 0
@@ -213,51 +273,98 @@ extract_audio_files() {
     fi
 }
 
-try_decrypt_baserom() {
-    local passphrase="$1"
-    log "Intentando desencriptar con contraseña..."
+find_baserom() {
+    log "Buscando baserom.us.z64 en ubicaciones conocidas..."
     
-    if gpg --batch --yes --quiet --pinentry-mode loopback \
-           --passphrase "$passphrase" \
-           --output "$BASEROM_FILE" \
-           --decrypt "$GPG_FILE" 2>/dev/null; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-obtain_baserom() {
-    if [[ -f "$BASEROM_FILE" ]]; then
-        log_success "baserom.us.z64 ya existe, saltando descarga"
-        return 0
-    fi
-    
-    log "Obteniendo baserom.us.z64..."
-    
-    if ! download_file "$GITHUB_URL" "$GPG_FILE" "archivo de baserom cifrado"; then
-        log_error "No se pudo descargar el archivo de baserom"
-        return 1
-    fi
-    
-    log "Intentando desencriptar baserom..."
-    local success=false
-    
-    for passphrase in "${PASSPHRASES[@]}"; do
-        if try_decrypt_baserom "$passphrase"; then
-            success=true
-            break
+    for location in "${BASEROM_LOCATIONS[@]}"; do
+        if [[ -f "$location" ]]; then
+            log_success "Baserom encontrado en: $location"
+            
+            # Copiar al directorio home si no está ahí
+            if [[ "$location" != "$BASEROM_FILE" ]]; then
+                log "Copiando baserom a $BASEROM_FILE..."
+                if cp "$location" "$BASEROM_FILE"; then
+                    log_success "Baserom copiado correctamente"
+                else
+                    log_error "Error al copiar baserom"
+                    return 1
+                fi
+            fi
+            
+            # Verificar que el archivo es válido (tamaño aproximado de 8MB)
+            local file_size
+            file_size=$(stat -c%s "$BASEROM_FILE" 2>/dev/null || echo 0)
+            
+            if (( file_size > 7000000 && file_size < 9000000 )); then
+                log_success "Baserom válido (tamaño: $((file_size / 1024 / 1024)) MB)"
+                return 0
+            else
+                log_error "El archivo baserom parece inválido (tamaño: $((file_size / 1024 / 1024)) MB)"
+                return 1
+            fi
         fi
     done
     
-    if [[ "$success" == "true" ]]; then
-        log_success "baserom.us.z64 desencriptado correctamente"
+    log_error "No se encontró baserom.us.z64 en ninguna ubicación"
+    log_error "Ubicaciones buscadas:"
+    for location in "${BASEROM_LOCATIONS[@]}"; do
+        log_error "  - $location"
+    done
+    log_error ""
+    log_error "Por favor, coloca el archivo baserom.us.z64 en una de estas ubicaciones:"
+    log_error "  - /storage/emulated/0/Download/baserom.us.z64"
+    log_error "  - /storage/emulated/0/baserom.us.z64"
+    
+    return 1
+}
+
+check_existing_build() {
+    if [[ -f "$APK_PATH" ]]; then
+        log_warning "Se detectó una compilación existente"
+        log "APK encontrado en: $APK_PATH"
         return 0
+    fi
+    return 1
+}
+
+clean_build() {
+    log "Realizando compilación limpia..."
+    
+    cd "$PROJECT_DIR"
+    
+    # Respaldar archivos de audio antes de limpiar
+    backup_audio_files
+    
+    # Ejecutar make distclean para limpiar completamente
+    log "Ejecutando make distclean..."
+    if make distclean >/dev/null 2>&1; then
+        log_success "Limpieza completa realizada"
     else
-        log_error "Error: No se pudo desencriptar baserom.us.z64 con ninguna contraseña"
-        log_error "El archivo puede estar corrupto o las contraseñas han cambiado"
+        log_warning "make distclean falló, continuando..."
+    fi
+    
+    # Copiar baserom si existe
+    if [[ -f "$BASEROM_FILE" ]]; then
+        cp "$BASEROM_FILE" "./baserom.us.z64"
+        log_success "Baserom copiado al directorio del proyecto"
+    fi
+    
+    # Extraer assets después de la limpieza
+    log "Extrayendo assets del juego..."
+    if python extract_assets.py us >/dev/null 2>&1; then
+        log_success "Assets extraídos correctamente"
+    else
+        log_error "Error al extraer assets"
         return 1
     fi
+    
+    # Restaurar archivos de audio o descargar nuevos
+    if ! restore_audio_files; then
+        log "Reemplazando archivos de audio..."
+        extract_audio_files || log_warning "No se pudieron obtener archivos de audio"
+    fi
+    
+    return 0
 }
 
 setup_project() {
@@ -265,9 +372,16 @@ setup_project() {
     
     cd "$HOME"
     
+    local needs_clean_build=false
+    
     if [[ -d "$PROJECT_DIR" ]]; then
         log "Actualizando proyecto existente..."
         cd "$PROJECT_DIR"
+        
+        # Verificar si existe una compilación previa
+        if check_existing_build; then
+            needs_clean_build=true
+        fi
         
         # Copiar baserom si existe
         if [[ -f "$BASEROM_FILE" ]]; then
@@ -279,6 +393,27 @@ setup_project() {
         git submodule update --init --recursive >/dev/null 2>&1
         
         log_success "Proyecto actualizado"
+        
+        # Realizar compilación limpia si es necesario
+        if $needs_clean_build; then
+            if ! clean_build; then
+                return 1
+            fi
+        else
+            # Extraer assets normalmente si no hay compilación previa
+            if [[ -f "./baserom.us.z64" ]]; then
+                log "Extrayendo assets del juego..."
+                if python extract_assets.py us >/dev/null 2>&1; then
+                    log_success "Assets extraídos correctamente"
+                else
+                    log_error "Error al extraer assets"
+                    return 1
+                fi
+            else
+                log_error "No se encontró baserom.us.z64 en el directorio del proyecto"
+                return 1
+            fi
+        fi
     else
         log "Clonando proyecto desde repositorio..."
         if git clone --recursive "$REPO_URL" "$PROJECT_DIR" >/dev/null 2>&1; then
@@ -290,24 +425,24 @@ setup_project() {
             fi
             
             log_success "Proyecto clonado correctamente"
+            
+            # Extraer assets para nuevo proyecto
+            if [[ -f "./baserom.us.z64" ]]; then
+                log "Extrayendo assets del juego..."
+                if python extract_assets.py us >/dev/null 2>&1; then
+                    log_success "Assets extraídos correctamente"
+                else
+                    log_error "Error al extraer assets"
+                    return 1
+                fi
+            else
+                log_error "No se encontró baserom.us.z64 en el directorio del proyecto"
+                return 1
+            fi
         else
             log_error "Error al clonar el repositorio"
             return 1
         fi
-    fi
-    
-    # Extraer assets si baserom existe
-    if [[ -f "./baserom.us.z64" ]]; then
-        log "Extrayendo assets del juego..."
-        if python extract_assets.py us >/dev/null 2>&1; then
-            log_success "Assets extraídos correctamente"
-        else
-            log_error "Error al extraer assets"
-            return 1
-        fi
-    else
-        log_error "No se encontró baserom.us.z64 en el directorio del proyecto"
-        return 1
     fi
 }
 
@@ -393,33 +528,40 @@ main() {
     fi
     echo
     
-    # Configurar trap para limpieza en caso de error
-    trap 'cleanup_temp_files' EXIT
+    # Configurar trap para limpieza solo al final exitoso
+    # trap 'cleanup_temp_files' EXIT
     
     # Ejecutar pasos principales
-    check_storage_permission
-    check_free_space
-    install_dependencies
+    check_storage_permission || { echo "$RESTART_INSTRUCTIONS"; exit 1; }
+    check_free_space || { echo "$RESTART_INSTRUCTIONS"; exit 1; }
+    install_dependencies || { echo "$RESTART_INSTRUCTIONS"; exit 1; }
     
-    if ! obtain_baserom; then
+    if ! find_baserom; then
         echo "$RESTART_INSTRUCTIONS"
         exit 2
     fi
     
-    extract_audio_files  # No es crítico si falla
+    # Solo extraer audio si no vamos a hacer compilación limpia
+    # (la compilación limpia maneja los audios internamente)
+    if [[ ! -d "$PROJECT_DIR" ]] || [[ ! -f "$APK_PATH" ]]; then
+        extract_audio_files || log_warning "No se pudieron obtener archivos de audio, continuando..."
+    fi
     
     if ! setup_project; then
+        cleanup_temp_files
         echo "$RESTART_INSTRUCTIONS"
         exit 3
     fi
     
     if ! build_project; then
         handle_build_failure
+        cleanup_temp_files
         echo "$RESTART_INSTRUCTIONS"
         exit 4
     fi
     
     if ! install_apk; then
+        cleanup_temp_files
         echo "$RESTART_INSTRUCTIONS"
         exit 5
     fi
