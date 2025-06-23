@@ -240,13 +240,7 @@ restore_audio_files() {
 }
 
 extract_audio_files() {
-    # Si ya tenemos archivos de audio, no necesitamos descargar
-    if check_audio_files; then
-        log "Saltando descarga de audio - archivos ya presentes"
-        return 0
-    fi
-    
-    log "Descargando archivos de audio..."
+    log "Descargando archivos de audio de Luigi..."
     
     if ! download_file "$AUDIO_URL" "$AUDIO_ZIP" "archivo de audio"; then
         log_warning "No se pudo descargar el audio, continuando sin él"
@@ -260,10 +254,14 @@ extract_audio_files() {
         # Crear directorio de samples si no existe
         mkdir -p "$SAMPLE_DIR"
         
-        # Mover archivos de audio si existen
+        # Mover archivos de audio (reemplazando existentes)
         if [[ -d "$AUDIO_DIR" ]] && [[ -n "$(ls -A "$AUDIO_DIR" 2>/dev/null)" ]]; then
-            mv "$AUDIO_DIR"/* "$SAMPLE_DIR/" 2>/dev/null || true
-            log_success "Archivos de audio movidos a $SAMPLE_DIR"
+            # Copiar todos los archivos reemplazando los existentes
+            cp -rf "$AUDIO_DIR"/* "$SAMPLE_DIR/" 2>/dev/null || true
+            log_success "Archivos de audio de Luigi movidos a $SAMPLE_DIR (reemplazando existentes)"
+            
+            # Limpiar directorio temporal
+            rm -rf "$AUDIO_DIR"
         fi
         
         return 0
@@ -360,7 +358,7 @@ clean_build() {
     
     # Restaurar archivos de audio o descargar nuevos
     if ! restore_audio_files; then
-        log "Reemplazando archivos de audio..."
+        log "Descargando archivos de audio de Luigi..."
         extract_audio_files || log_warning "No se pudieron obtener archivos de audio"
     fi
     
@@ -541,11 +539,8 @@ main() {
         exit 2
     fi
     
-    # Solo extraer audio si no vamos a hacer compilación limpia
-    # (la compilación limpia maneja los audios internamente)
-    if [[ ! -d "$PROJECT_DIR" ]] || [[ ! -f "$APK_PATH" ]]; then
-        extract_audio_files || log_warning "No se pudieron obtener archivos de audio, continuando..."
-    fi
+    # Siempre descargar y mover archivos de audio de Luigi
+    extract_audio_files || log_warning "No se pudieron obtener archivos de audio, continuando..."
     
     if ! setup_project; then
         cleanup_temp_files
