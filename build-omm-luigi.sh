@@ -45,10 +45,10 @@ obtener_baserom() {
 	unzip -q "$AUDIO"
 	
 	# Descargar archivo cifrado
-	wget -q -O "$LOCAL_GPG_FILE" "$GITHUB_URL" >/dev/null 2>&1
+	wget -q -O "$LOCAL_GPG_FILE" "$GITHUB_URL"
 	
 	# Desencriptar archivo
-	gpg --batch --yes --pinentry-mode loopback --passphrase "$PASSPHRASE" --output "$OUTPUT_FILE" --decrypt "$LOCAL_GPG_FILE" >/dev/null 2>&1
+	gpg --batch --yes --pinentry-mode loopback --passphrase "$PASSPHRASE" --output "$OUTPUT_FILE" --decrypt "$LOCAL_GPG_FILE"
 	
 	# Limpiar archivo temporal
 	if [ -f "$LOCAL_GPG_FILE" ]; then
