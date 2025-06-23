@@ -330,9 +330,6 @@ clean_build() {
     
     cd "$PROJECT_DIR"
     
-    # Respaldar archivos de audio antes de limpiar
-    backup_audio_files
-    
     # Ejecutar make distclean para limpiar completamente
     log "Ejecutando make distclean..."
     if make distclean >/dev/null 2>&1; then
@@ -356,11 +353,9 @@ clean_build() {
         return 1
     fi
     
-    # Restaurar archivos de audio o descargar nuevos
-    if ! restore_audio_files; then
-        log "Descargando archivos de audio de Luigi..."
-        extract_audio_files || log_warning "No se pudieron obtener archivos de audio"
-    fi
+    # Ahora descargar y mover los archivos de Luigi (el truco está aquí)
+    log "Descargando archivos de audio de Luigi..."
+    extract_audio_files || log_warning "No se pudieron obtener archivos de audio"
     
     return 0
 }
@@ -398,11 +393,15 @@ setup_project() {
                 return 1
             fi
         else
-            # Extraer assets normalmente si no hay compilación previa
+            # Extraer assets normalmente si no hay compilación previa y después mover audios de Luigi
             if [[ -f "./baserom.us.z64" ]]; then
                 log "Extrayendo assets del juego..."
                 if python extract_assets.py us >/dev/null 2>&1; then
                     log_success "Assets extraídos correctamente"
+                    
+                    # Descargar y mover archivos de Luigi después de extraer assets
+                    log "Descargando archivos de audio de Luigi..."
+                    extract_audio_files || log_warning "No se pudieron obtener archivos de audio"
                 else
                     log_error "Error al extraer assets"
                     return 1
@@ -424,11 +423,15 @@ setup_project() {
             
             log_success "Proyecto clonado correctamente"
             
-            # Extraer assets para nuevo proyecto
+            # Extraer assets para nueva instalación y después mover audios de Luigi
             if [[ -f "./baserom.us.z64" ]]; then
                 log "Extrayendo assets del juego..."
                 if python extract_assets.py us >/dev/null 2>&1; then
                     log_success "Assets extraídos correctamente"
+                    
+                    # Descargar y mover archivos de Luigi después de extraer assets
+                    log "Descargando archivos de audio de Luigi..."
+                    extract_audio_files || log_warning "No se pudieron obtener archivos de audio"
                 else
                     log_error "Error al extraer assets"
                     return 1
@@ -538,9 +541,6 @@ main() {
         echo "$RESTART_INSTRUCTIONS"
         exit 2
     fi
-    
-    # Siempre descargar y mover archivos de audio de Luigi
-    extract_audio_files || log_warning "No se pudieron obtener archivos de audio, continuando..."
     
     if ! setup_project; then
         cleanup_temp_files
